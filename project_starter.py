@@ -451,3 +451,231 @@ def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
         print(f"Error getting cash balance: {e}")
         return 0.0
 
+
+
+def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
+    """
+    Generate a complete financial report for the company as of a specific date.
+
+    This includes:
+    - Cash balance
+    - Inventory valuation
+    - Combined asset total
+    - Itemized inventory breakdown
+    - Top 5 best-selling products
+
+    Args:
+        as_of_date (str or datetime): The date (inclusive) for which to generate the report.
+
+    Returns:
+        Dict: A dictionary containing the financial report fields:
+            - 'as_of_date': The date of the report
+            - 'cash_balance': Total cash available
+            - 'inventory_value': Total value of inventory
+            - 'total_assets': Combined cash and inventory value
+            - 'inventory_summary': List of items with stock and valuation details
+            - 'top_selling_products': List of top 5 products by revenue
+    """
+    # Normalize date input
+    if isinstance(as_of_date, datetime):
+        as_of_date = as_of_date.isoformat()
+
+    # Get current cash balance
+    cash = get_cash_balance(as_of_date)
+
+    # Get current inventory snapshot
+    inventory_df = pd.read_sql("SELECT * FROM inventory", db_engine)
+    inventory_value = 0.0
+    inventory_summary = []
+
+    # Compute total inventory value and summary by item
+    for _, item in inventory_df.iterrows():
+        stock_info = get_stock_level(item["item_name"], as_of_date)
+        stock = stock_info["current_stock"].iloc[0]
+        item_value = stock * item["unit_price"]
+        inventory_value += item_value
+
+        inventory_summary.append({
+            "item_name": item["item_name"],
+            "stock": stock,
+            "unit_price": item["unit_price"],
+            "value": item_value,
+        })
+
+    # Identify top-selling products by revenue
+    top_sales_query = """
+        SELECT item_name, SUM(units) as total_units, SUM(price) as total_revenue
+        FROM transactions
+        WHERE transaction_type = 'sales' AND transaction_date <= :date
+        GROUP BY item_name
+        ORDER BY total_revenue DESC
+        LIMIT 5
+    """
+    top_sales = pd.read_sql(top_sales_query, db_engine, params={"date": as_of_date})
+    top_selling_products = top_sales.to_dict(orient="records")
+
+    return {
+        "as_of_date": as_of_date,
+        "cash_balance": cash,
+        "inventory_value": inventory_value,
+        "total_assets": cash + inventory_value,
+        "inventory_summary": inventory_summary,
+        "top_selling_products": top_selling_products,
+    }
+
+
+def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
+    """
+    Retrieve a list of historical quotes that match any of the provided search terms.
+
+    The function searches both the original customer request (from `quote_requests`) and
+    the explanation for the quote (from `quotes`) for each keyword. Results are sorted by
+    most recent order date and limited by the `limit` parameter.
+
+    Args:
+        search_terms (List[str]): List of terms to match against customer requests and explanations.
+        limit (int, optional): Maximum number of quote records to return. Default is 5.
+
+    Returns:
+        List[Dict]: A list of matching quotes, each represented as a dictionary with fields:
+            - original_request
+            - total_amount
+            - quote_explanation
+            - job_type
+            - order_size
+            - event_type
+            - order_date
+    """
+    conditions = []
+    params = {}
+
+    # Build SQL WHERE clause using LIKE filters for each search term
+    for i, term in enumerate(search_terms):
+        param_name = f"term_{i}"
+        conditions.append(
+            f"(LOWER(qr.response) LIKE :{param_name} OR "
+            f"LOWER(q.quote_explanation) LIKE :{param_name})"
+        )
+        params[param_name] = f"%{term.lower()}%"
+
+    # Combine conditions; fallback to always-true if no terms provided
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    # Final SQL query to join quotes with quote_requests
+    query = f"""
+        SELECT
+            qr.response AS original_request,
+            q.total_amount,
+            q.quote_explanation,
+            q.job_type,
+            q.order_size,
+            q.event_type,
+            q.order_date
+        FROM quotes q
+        JOIN quote_requests qr ON q.request_id = qr.id
+        WHERE {where_clause}
+        ORDER BY q.order_date DESC
+        LIMIT {limit}
+    """
+
+    # Execute parameterized query
+    with db_engine.connect() as conn:
+        result = conn.execute(text(query), params)
+        return [dict(row) for row in result]
+
+
+"""Set up tools for your agents to use, these should be methods that combine the database functions above
+ and apply criteria to them to ensure that the flow of the system is correct."""
+
+
+# Tools for inventory agent
+
+
+# Tools for quoting agent
+
+
+# Tools for ordering agent
+
+
+# Set up agents and create an orchestration agent 
+
+
+# Run test scenarios 
+
+def run_test_scenarios():
+    
+    print("Initializing Database...")
+    init_database()
+    try:
+        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+        quote_requests_sample["request_date"] = pd.to_datetime(
+            quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
+        )
+        quote_requests_sample.dropna(subset=["request_date"], inplace=True)
+        quote_requests_sample = quote_requests_sample.sort_values("request_date")
+    except Exception as e:
+        print(f"FATAL: Error loading test data: {e}")
+        return
+
+    quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+
+    # Sort by date
+    quote_requests_sample["request_date"] = pd.to_datetime(
+        quote_requests_sample["request_date"]
+    )
+    quote_requests_sample = quote_requests_sample.sort_values("request_date")
+
+    # Get initial state
+    initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
+    report = generate_financial_report(initial_date)
+    current_cash = report["cash_balance"]
+    current_inventory = report["inventory_value"]
+
+    results = []
+    for idx, row in quote_requests_sample.iterrows():
+        request_date = row["request_date"].strftime("%Y-%m-%d")
+
+        print(f"\n=== Request {idx+1} ===")
+        print(f"Context: {row['job']} organizing {row['event']}")
+        print(f"Request Date: {request_date}")
+        print(f"Cash Balance: ${current_cash:.2f}")
+        print(f"Inventory Value: ${current_inventory:.2f}")
+
+        # Process request
+        request_with_date = f"{row['request']} (Date of request: {request_date})"
+
+        # Update state
+        report = generate_financial_report(request_date)
+        current_cash = report["cash_balance"]
+        current_inventory = report["inventory_value"]
+
+        print(f"Response: {response}")
+        print(f"Updated Cash: ${current_cash:.2f}")
+        print(f"Updated Inventory: ${current_inventory:.2f}")
+
+        results.append(
+            {
+                "request_id": idx + 1,
+                "request_date": request_date,
+                "cash_balance": current_cash,
+                "inventory_value": current_inventory,
+                "response": response,
+            }
+        )
+
+        time.sleep(1)
+
+    # Final report
+    final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
+    final_report = generate_financial_report(final_date)
+    print("\n===== FINAL FINANCIAL REPORT =====")
+    print(f"Final Cash: ${final_report['cash_balance']:.2f}")
+    print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
+
+    # Save results
+    pd.DataFrame(results).to_csv("test_results.csv", index=False)
+    return results
+
+
+if __name__ == "__main__":
+    results = run_test_scenarios()
