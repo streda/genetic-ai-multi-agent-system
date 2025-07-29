@@ -84,3 +84,7 @@ def orchestrator_agent(request_text: str) -> str:
         f"Delivery Estimate:\n{delivery_result}\n"
     )
     return final_response
+
+# Run evaluation on sample data
+if __name__ == "__main__":
+    run_test_scenarios(orchestrator_agent)
