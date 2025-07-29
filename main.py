@@ -32,3 +32,31 @@ sales_tools = [
 delivery_tools = [
     Tool(name="get_supplier_delivery_date", func=get_supplier_delivery_date, description="Estimate supplier delivery time."),
 ]
+
+# Inventory Agent
+inventory_agent = Agent(
+    role="Inventory Manager",
+    goal="Check inventory, assess reorder needs, and provide availability updates.",
+    tools=inventory_tools,
+)
+
+# Quote Agent
+quote_agent = Agent(
+    role="Quotation Specialist",
+    goal="Generate accurate and competitive price quotes using historical data and customer request.",
+    tools=quote_tools,
+)
+
+# Sales Agent
+sales_agent = Agent(
+    role="Sales Processor",
+    goal="Process successful orders, update inventory, and record transactions.",
+    tools=sales_tools,
+)
+
+# Delivery Agent
+delivery_agent = Agent(
+    role="Delivery Scheduler",
+    goal="Provide expected delivery timelines using supplier information.",
+    tools=delivery_tools,
+)
