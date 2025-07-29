@@ -328,3 +328,126 @@ def get_all_inventory(as_of_date: str) -> Dict[str, int]:
 
     # Convert the result into a dictionary {item_name: stock}
     return dict(zip(result["item_name"], result["stock"]))
+
+
+
+def get_stock_level(item_name: str, as_of_date: Union[str, datetime]) -> pd.DataFrame:
+    """
+    Retrieve the stock level of a specific item as of a given date.
+
+    This function calculates the net stock by summing all 'stock_orders' and 
+    subtracting all 'sales' transactions for the specified item up to the given date.
+
+    Args:
+        item_name (str): The name of the item to look up.
+        as_of_date (str or datetime): The cutoff date (inclusive) for calculating stock.
+
+    Returns:
+        pd.DataFrame: A single-row DataFrame with columns 'item_name' and 'current_stock'.
+    """
+    # Convert date to ISO string format if it's a datetime object
+    if isinstance(as_of_date, datetime):
+        as_of_date = as_of_date.isoformat()
+
+    # SQL query to compute net stock level for the item
+    stock_query = """
+        SELECT
+            item_name,
+            COALESCE(SUM(CASE
+                WHEN transaction_type = 'stock_orders' THEN units
+                WHEN transaction_type = 'sales' THEN -units
+                ELSE 0
+            END), 0) AS current_stock
+        FROM transactions
+        WHERE item_name = :item_name
+        AND transaction_date <= :as_of_date
+    """
+
+    # Execute query and return result as a DataFrame
+    return pd.read_sql(
+        stock_query,
+        db_engine,
+        params={"item_name": item_name, "as_of_date": as_of_date},
+    )
+
+def get_supplier_delivery_date(input_date_str: str, quantity: int) -> str:
+    """
+    Estimate the supplier delivery date based on the requested order quantity and a starting date.
+
+    Delivery lead time increases with order size:
+        - ≤10 units: same day
+        - 11–100 units: 1 day
+        - 101–1000 units: 4 days
+        - >1000 units: 7 days
+
+    Args:
+        input_date_str (str): The starting date in ISO format (YYYY-MM-DD).
+        quantity (int): The number of units in the order.
+
+    Returns:
+        str: Estimated delivery date in ISO format (YYYY-MM-DD).
+    """
+    # Debug log 
+    print(f"FUNC (get_supplier_delivery_date): Calculating for qty {quantity} from date string '{input_date_str}'")
+
+    # Attempt to parse the input date
+    try:
+        input_date_dt = datetime.fromisoformat(input_date_str.split("T")[0])
+    except (ValueError, TypeError):
+        # Fallback to current date on format error
+        print(f"WARN (get_supplier_delivery_date): Invalid date format '{input_date_str}', using today as base.")
+        input_date_dt = datetime.now()
+
+    # Determine delivery delay based on quantity
+    if quantity <= 10:
+        days = 0
+    elif quantity <= 100:
+        days = 1
+    elif quantity <= 1000:
+        days = 4
+    else:
+        days = 7
+
+    # Add delivery days to the starting date
+    delivery_date_dt = input_date_dt + timedelta(days=days)
+
+    # Return formatted delivery date
+    return delivery_date_dt.strftime("%Y-%m-%d")
+
+def get_cash_balance(as_of_date: Union[str, datetime]) -> float:
+    """
+    Calculate the current cash balance as of a specified date.
+
+    The balance is computed by subtracting total stock purchase costs ('stock_orders')
+    from total revenue ('sales') recorded in the transactions table up to the given date.
+
+    Args:
+        as_of_date (str or datetime): The cutoff date (inclusive) in ISO format or as a datetime object.
+
+    Returns:
+        float: Net cash balance as of the given date. Returns 0.0 if no transactions exist or an error occurs.
+    """
+    try:
+        # Convert date to ISO format if it's a datetime object
+        if isinstance(as_of_date, datetime):
+            as_of_date = as_of_date.isoformat()
+
+        # Query all transactions on or before the specified date
+        transactions = pd.read_sql(
+            "SELECT * FROM transactions WHERE transaction_date <= :as_of_date",
+            db_engine,
+            params={"as_of_date": as_of_date},
+        )
+
+        # Compute the difference between sales and stock purchases
+        if not transactions.empty:
+            total_sales = transactions.loc[transactions["transaction_type"] == "sales", "price"].sum()
+            total_purchases = transactions.loc[transactions["transaction_type"] == "stock_orders", "price"].sum()
+            return float(total_sales - total_purchases)
+
+        return 0.0
+
+    except Exception as e:
+        print(f"Error getting cash balance: {e}")
+        return 0.0
+
