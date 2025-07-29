@@ -290,3 +290,41 @@ def create_transaction(
     except Exception as e:
         print(f"Error creating transaction: {e}")
         raise
+
+
+def get_all_inventory(as_of_date: str) -> Dict[str, int]:
+    """
+    Retrieve a snapshot of available inventory as of a specific date.
+
+    This function calculates the net quantity of each item by summing 
+    all stock orders and subtracting all sales up to and including the given date.
+
+    Only items with positive stock are included in the result.
+
+    Args:
+        as_of_date (str): ISO-formatted date string (YYYY-MM-DD) representing the inventory cutoff.
+
+    Returns:
+        Dict[str, int]: A dictionary mapping item names to their current stock levels.
+    """
+    # SQL query to compute stock levels per item as of the given date
+    query = """
+        SELECT
+            item_name,
+            SUM(CASE
+                WHEN transaction_type = 'stock_orders' THEN units
+                WHEN transaction_type = 'sales' THEN -units
+                ELSE 0
+            END) as stock
+        FROM transactions
+        WHERE item_name IS NOT NULL
+        AND transaction_date <= :as_of_date
+        GROUP BY item_name
+        HAVING stock > 0
+    """
+
+    # Execute the query with the date parameter
+    result = pd.read_sql(query, db_engine, params={"as_of_date": as_of_date})
+
+    # Convert the result into a dictionary {item_name: stock}
+    return dict(zip(result["item_name"], result["stock"]))
