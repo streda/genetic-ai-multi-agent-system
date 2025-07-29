@@ -60,3 +60,27 @@ delivery_agent = Agent(
     goal="Provide expected delivery timelines using supplier information.",
     tools=delivery_tools,
 )
+
+
+# Orchestrator Agent
+def orchestrator_agent(request_text: str) -> str:
+    # Check Inventory
+    inventory_result = inventory_agent(f"The customer requested: {request_text}. What is the stock status of the requested items?")
+
+    # Generate Quote
+    quote_result = quote_agent(f"The customer requested: {request_text}. Use historical data to suggest a price quote.")
+
+    # Process Order
+    sales_result = sales_agent(f"We have generated a quote and customer agreed. Process the transaction for: {request_text}")
+
+    # Estimate Delivery
+    delivery_result = delivery_agent(f"Provide estimated delivery date for: {request_text}")
+
+    # Combine customer-facing response
+    final_response = (
+        f"Inventory Check:\n{inventory_result}\n\n"
+        f"Quote:\n{quote_result}\n\n"
+        f"Sales Processing:\n{sales_result}\n\n"
+        f"Delivery Estimate:\n{delivery_result}\n"
+    )
+    return final_response
