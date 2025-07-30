@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import os
 import time
+import asyncio
 import dotenv
 import ast
 from sqlalchemy.sql import text
@@ -10,7 +11,7 @@ from typing import Dict, List, Union
 from sqlalchemy import create_engine, Engine
 
 # Creates an SQLite database
-db_engine = create_engine("sqlite:///munder_difflin.db")
+db_engine = create_engine("sqlite:///munder_difflin.db", connect_args={"check_same_thread": False})
 
 # Lists containing the different kinds of papers 
 paper_supplies = [
@@ -602,80 +603,71 @@ def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
 
 # Run test scenarios 
 
-def run_test_scenarios():
-    
-    print("Initializing Database...")
-    init_database()
-    try:
-        quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
-        quote_requests_sample["request_date"] = pd.to_datetime(
-            quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
-        )
-        quote_requests_sample.dropna(subset=["request_date"], inplace=True)
-        quote_requests_sample = quote_requests_sample.sort_values("request_date")
-    except Exception as e:
-        print(f"FATAL: Error loading test data: {e}")
-        return
+# def run_test_scenarios():
 
-    quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
+import csv
+import json
+import time
+from datetime import datetime
 
-    # Sort by date
-    quote_requests_sample["request_date"] = pd.to_datetime(
-        quote_requests_sample["request_date"]
-    )
-    quote_requests_sample = quote_requests_sample.sort_values("request_date")
+def run_test_scenarios(agent_fn):
+    print("\nRunning Test Scenarios...\n")
 
-    # Get initial state
-    initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
-    report = generate_financial_report(initial_date)
-    current_cash = report["cash_balance"]
-    current_inventory = report["inventory_value"]
+    df = pd.read_csv("quote_requests_sample.csv")
+    all_results = []
 
-    results = []
-    for idx, row in quote_requests_sample.iterrows():
-        request_date = row["request_date"].strftime("%Y-%m-%d")
+    for i, row in df.iterrows():
+        print(f"\n=== Request {i+1} ===")
+        request_text = row["request"]
+        request_date = row["request_date"]
+        context = row["context"]
 
-        print(f"\n=== Request {idx+1} ===")
-        print(f"Context: {row['job']} organizing {row['event']}")
+        print(f"Context: {context}")
         print(f"Request Date: {request_date}")
-        print(f"Cash Balance: ${current_cash:.2f}")
-        print(f"Inventory Value: ${current_inventory:.2f}")
 
-        # Process request
-        request_with_date = f"{row['request']} (Date of request: {request_date})"
+        full_request = f"On {request_date}, a {row['job_role']} with a {row['mood']} mood made the following request: {request_text}. Context: {context}."
 
-        # Update state
-        report = generate_financial_report(request_date)
-        current_cash = report["cash_balance"]
-        current_inventory = report["inventory_value"]
+        pre_cash = get_cash_balance(request_date)
 
-        print(f"Response: {response}")
-        print(f"Updated Cash: ${current_cash:.2f}")
-        print(f"Updated Inventory: ${current_inventory:.2f}")
+        try:
+            response = agent_fn(full_request)
+            if asyncio.iscoroutine(response):
+                response = asyncio.run(response)
+        except Exception as e:
+            response = f"ERROR: {str(e)}"
 
-        results.append(
-            {
-                "request_id": idx + 1,
-                "request_date": request_date,
-                "cash_balance": current_cash,
-                "inventory_value": current_inventory,
-                "response": response,
-            }
-        )
+        # Always serialize response for CSV
+        if not isinstance(response, str):
+            try:
+                response = json.dumps(response, indent=2, ensure_ascii=False)
+            except Exception:
+                response = str(response)
 
-        time.sleep(1)
+        post_cash = get_cash_balance(request_date)
+        cash_change = post_cash - pre_cash
 
-    # Final report
-    final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
-    final_report = generate_financial_report(final_date)
-    print("\n===== FINAL FINANCIAL REPORT =====")
-    print(f"Final Cash: ${final_report['cash_balance']:.2f}")
-    print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
+        all_results.append({
+            "request_id": i + 1,
+            "date": request_date,
+            "context": context,
+            "request": request_text,
+            "response": response,
+            "cash_change": round(cash_change, 2)
+        })
 
-    # Save results
-    pd.DataFrame(results).to_csv("test_results.csv", index=False)
-    return results
+        print(f"Cash Balance: ${pre_cash:,.2f} → ${post_cash:,.2f}")
+        print("Response Summary:\n", str(response)[:300], "\n...")
+        time.sleep(0.2)
 
+    # Save to CSV
+    keys = all_results[0].keys()
+    with open("test_results.csv", "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(all_results)
+
+    print("\nAll test results saved to test_results.csv.")
 
 if __name__ == "__main__":
-    results = run_test_scenarios()
+    init_database(db_engine)
+    run_test_scenarios(lambda request: asyncio.run(orchestrator_agent(request)))

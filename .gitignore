@@ -1,0 +1,7 @@
+smolenv/
+__pycache__/
+*.pyc
+
+reflection_report.md
+
+.env

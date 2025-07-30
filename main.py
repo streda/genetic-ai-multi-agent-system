@@ -1,4 +1,10 @@
-from npcpy import tool, agent, AgentExecutor
+from pydantic_ai import Agent, Tool
+import asyncio
+
+from dotenv import load_dotenv
+load_dotenv()
+
+from sqlalchemy import create_engine
 from project_starter import (
     get_all_inventory,
     get_stock_level,
@@ -8,108 +14,135 @@ from project_starter import (
     generate_financial_report,
     search_quote_history,
     run_test_scenarios,
+    init_database  
 )
 
-# ------------------- TOOLS -------------------
+# Create database engine
+db_engine = create_engine("sqlite:///beavers_choice.db")
 
-@tool
-def get_all_inventory_tool():
-    """Get the full inventory list."""
-    return get_all_inventory()
-
-@tool
-def get_stock_level_tool(item_name: str):
-    """Check stock level for a specific item."""
-    return get_stock_level(item_name)
-
-@tool
-def get_cash_balance_tool():
-    """Retrieve current cash balance."""
-    return get_cash_balance()
-
-@tool
-def search_quote_history_tool(query: str):
-    """Search historical quotes for reference."""
-    return search_quote_history(query)
-
-@tool
-def create_transaction_tool(transaction_details: str):
-    """Finalize a transaction and update inventory."""
-    return create_transaction(transaction_details)
-
-@tool
-def generate_financial_report_tool():
-    """Generate a financial summary."""
-    return generate_financial_report()
-
-@tool
-def get_supplier_delivery_date_tool(item_name: str):
-    """Estimate supplier delivery time."""
-    return get_supplier_delivery_date(item_name)
+# Initialize database
+init_database(db_engine)
 
 
-# ------------------- AGENTS -------------------
+from project_starter import get_stock_level as _get_stock_level
+from typing import Union
+import pandas as pd
+from datetime import datetime
 
-@agent(
-    tools=[
-        get_all_inventory_tool,
-        get_stock_level_tool,
-        get_cash_balance_tool,
-    ],
-    description="Check inventory, assess reorder needs, and provide availability updates.",
+from project_starter import get_stock_level as _get_stock_level
+
+def get_stock_level_serializable(item_name: str, as_of_date: Union[str, datetime]) -> dict:
+    df = _get_stock_level(item_name, as_of_date)
+    if df.empty:
+        return {"item_name": item_name, "current_stock": 0}
+    row = df.iloc[0]
+    return {"item_name": str(row["item_name"]), "current_stock": int(row["current_stock"])}
+
+inventory_tools = [
+    Tool(get_all_inventory, name="get_all_inventory", description="Get the full inventory list."),
+    Tool(get_stock_level_serializable, name="get_stock_level", description="Check stock level for a specific item."),
+    Tool(get_cash_balance, name="get_cash_balance", description="Retrieve current cash balance."),
+]
+
+# Quote Tools
+quote_tools = [
+    Tool(search_quote_history, name="search_quote_history", description="Search historical quotes for reference."),
+]
+
+# Sales Tools
+sales_tools = [
+    Tool(create_transaction, name="create_transaction", description="Finalize a transaction and update inventory."),
+    Tool(generate_financial_report, name="generate_financial_report", description="Generate a financial summary."),
+]
+
+# Delivery Tools
+delivery_tools = [
+    Tool(get_supplier_delivery_date, name="get_supplier_delivery_date", description="Estimate supplier delivery time."),
+]
+
+# Agents
+inventory_agent = Agent(
+    role="Inventory Manager",
+    goal="Check inventory, assess reorder needs, and provide availability updates.",
+    tools=inventory_tools,  
+    model="gpt-4o",
 )
-def inventory_agent(task: str) -> str:
-    return f"Received task: {task}"
 
-
-@agent(
-    tools=[
-        search_quote_history_tool,
-    ],
-    description="Generate accurate and competitive price quotes using historical data.",
+quote_agent = Agent(
+    role="Quotation Specialist",
+    goal="Generate accurate and competitive price quotes using historical data and customer request.",
+    tools=quote_tools,
+    model="gpt-4o",
 )
-def quote_agent(task: str) -> str:
-    return f"Received task: {task}"
 
-
-@agent(
-    tools=[
-        create_transaction_tool,
-        generate_financial_report_tool,
-    ],
-    description="Process orders, update inventory, and record transactions.",
+sales_agent = Agent(
+    role="Sales Processor",
+    goal="Process successful orders, update inventory, and record transactions.",
+    tools=sales_tools,
+    model="gpt-4o",
 )
-def sales_agent(task: str) -> str:
-    return f"Received task: {task}"
 
-
-@agent(
-    tools=[
-        get_supplier_delivery_date_tool,
-    ],
-    description="Estimate delivery timelines using supplier information.",
+delivery_agent = Agent(
+    role="Delivery Scheduler",
+    goal="Provide expected delivery timelines using supplier information.",
+    tools=delivery_tools,
+    model="gpt-4o",
 )
-def delivery_agent(task: str) -> str:
-    return f"Received task: {task}"
 
+import asyncio, json
+from pydantic_ai.agent import AgentRunResult
 
-# ------------------- ORCHESTRATOR -------------------
+db_lock = asyncio.Lock()
 
-def orchestrator_agent(request_text: str) -> str:
-    inventory_result = inventory_agent.run(f"The customer requested: {request_text}. What is the stock status of the requested items?")
-    quote_result = quote_agent.run(f"The customer requested: {request_text}. Use historical data to suggest a price quote.")
-    sales_result = sales_agent.run(f"We have generated a quote and customer agreed. Process the transaction for: {request_text}")
-    delivery_result = delivery_agent.run(f"Provide estimated delivery date for: {request_text}")
+async def safe_create_transaction(
+    item_name: str,
+    transaction_type: str,
+    quantity: int,
+    price: float,
+    date: Union[str, datetime],
+) -> int:
+    async with db_lock:
+        return create_transaction(item_name, transaction_type, quantity, price, date)
 
-    return (
-        f"Inventory Check:\n{inventory_result}\n\n"
-        f"Quote:\n{quote_result}\n\n"
-        f"Sales Processing:\n{sales_result}\n\n"
-        f"Delivery Estimate:\n{delivery_result}\n"
+sales_tools = [
+    Tool(safe_create_transaction,
+         name="create_transaction",
+         description="Finalize a transaction and update inventory safely."),
+    Tool(generate_financial_report, name="generate_financial_report", description="Generate a financial summary."),
+]
+
+async def run_and_unwrap(agent, prompt):
+    raw = await agent.run(prompt)
+    if isinstance(raw, AgentRunResult):
+        raw = raw.output
+    if not isinstance(raw, str):
+        raw = json.dumps(raw, ensure_ascii=False)
+    return raw
+
+# Orchestrator Agent
+async def orchestrator_agent(request_text: str) -> str:
+    inv = await run_and_unwrap(inventory_agent,
+        f"The customer requested: {request_text}. What is the stock status?"
+    )
+    quote = await run_and_unwrap(quote_agent,
+        f"…generate a quote with rationale…"
+    )
+    sales = await run_and_unwrap(sales_agent,
+        f"…process transaction…"
+    )
+    deliver = await run_and_unwrap(delivery_agent,
+        f"…estimate delivery…"
     )
 
+    return (
+        f"Inventory Availability:\n{inv}\n\n"
+        f"Quote Summary:\n{quote}\n\n"
+        f"Order Confirmation:\n{sales}\n\n"
+        f"Delivery Estimate:\n{deliver}"
+    )
 
-# ------------------- TEST HARNESS -------------------
-
+# Run tests
 if __name__ == "__main__":
-    run_test_scenarios(orchestrator_agent)
+    init_database(db_engine)
+    # Save test results to test_results.csv
+    run_test_scenarios(lambda request: asyncio.run(orchestrator_agent(request)))
